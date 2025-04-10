@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Touch Controller</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        /* Base Styles */
+        html, body { margin: 0; padding: 0; width: 100%; height: 100%; overflow: hidden; background-color: #eee; display: flex; flex-direction: column; overscroll-behavior-y: contain; font-family: sans-serif;}
+        #touchSurface { flex-grow: 1; display: block; width: 100%; cursor: crosshair; box-sizing: border-box; position: relative; z-index: 1; background-color: #f8f8f8; border-bottom: 1px solid #aaa; touch-action: none; } /* touch-action is crucial */
+
+        /* Keyboard Container */
+        #virtualKeyboard { display: block; width: 100%; background-color: #ccc; padding: 5px; box-sizing: border-box; z-index: 5; user-select: none; -webkit-user-select: none; -moz-user-select: none; -ms-user-select: none; flex-shrink: 0; }
+
+        /* Keyboard Rows */
+        .keyboard-row { display: flex; justify-content: center; margin-bottom: 4px; }
+        .keyboard-row:last-child { margin-bottom: 0; }
+
+        /* Base Key Style */
+        .keyboard-key {
+            background-color: #fefefe; border: 1px solid #bbb; border-radius: 5px;
+            padding: 0; margin: 0 1.5px; font-size: 16px; font-weight: 400;
+            cursor: pointer; flex-grow: 1; text-align: center;
+            min-width: 0; height: 40px; line-height: 40px;
+            box-shadow: 0 1px 1px rgba(0,0,0,0.1); -webkit-tap-highlight-color: transparent;
+            display: flex; justify-content: center; align-items: center;
+            white-space: pre; flex-basis: 0;
+        }
+        .keyboard-key:active { background-color: #ddd; box-shadow: inset 0 1px 2px rgba(0,0,0,0.2); }
+
+        /* Specific Key Sizes / Styles */
+        .key-space { flex-grow: 4; }
+        .key-enter { flex-grow: 2; background-color: #b0c4de; }
+        .key-backspace { flex-grow: 1.5; background-color: #d3d3d3; }
+        .key-shift { flex-grow: 1.5; background-color: #d3d3d3; }
+        .key-shift.active { background-color: #a9a9a9; color: white; box-shadow: inset 0 1px 3px rgba(0,0,0,0.4); }
+        .key-mode-switch { flex-grow: 1.5; background-color: #d3d3d3; }
+
+        /* Layer Visibility */
+        .keyboard-layer { display: none; flex-direction: column; }
+        .keyboard-layer.active { display: flex; }
+
+        /* === Intro Animation Styles === */
+        #introAnimation {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background-color: rgba(248, 248, 248, 0.85); z-index: 10;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            pointer-events: none; /* Allow touches to pass through */
+            opacity: 1; transition: opacity 0.5s ease-out;
+        }
+        #introAnimation.hidden { opacity: 0; }
+        #introAnimation p { margin-top: 80px; font-size: 1.1em; color: #555; text-align: center; }
+        #animHand { position: absolute; font-size: 30px; top: 40%; left: 30%; transform: translate(-50%, -50%); animation: moveHand 4s ease-in-out infinite; }
+        #animDot { position: absolute; width: 10px; height: 10px; background-color: red; border-radius: 50%; top: calc(40% + 15px); left: calc(30% + 5px); transform: translate(-50%, -50%); animation: moveHand 4s ease-in-out infinite; animation-delay: 0.05s; }
+        @keyframes moveHand { 0%, 100% { top: 40%; left: 30%; } 25% { top: 30%; left: 70%; } 50% { top: 60%; left: 80%; } 75% { top: 70%; left: 20%; } }
+
+    </style>
+</head>
+<body>
+    <div id="touchSurface">
+        <!-- Intro Animation Overlay -->
+        <div id="introAnimation">
+            <div id="animHand">👆</div>
+            <div id="animDot"></div>
+            <p>Touch and drag here to control cursor</p>
+        </div>
+    </div>
+    <div id="virtualKeyboard">
+        <!-- === Letters Layer === -->
+        <div class="keyboard-layer active" id="layer-letters">
+            <div class="keyboard-row"> <button class="keyboard-key" data-key="q" data-shift="Q">q</button> <button class="keyboard-key" data-key="w" data-shift="W">w</button> <button class="keyboard-key" data-key="e" data-shift="E">e</button> <button class="keyboard-key" data-key="r" data-shift="R">r</button> <button class="keyboard-key" data-key="t" data-shift="T">t</button> <button class="keyboard-key" data-key="y" data-shift="Y">y</button> <button class="keyboard-key" data-key="u" data-shift="U">u</button> <button class="keyboard-key" data-key="i" data-shift="I">i</button> <button class="keyboard-key" data-key="o" data-shift="O">o</button> <button class="keyboard-key" data-key="p" data-shift="P">p</button> </div>
+            <div class="keyboard-row" style="padding: 0 5%;"> <button class="keyboard-key" data-key="a" data-shift="A">a</button> <button class="keyboard-key" data-key="s" data-shift="S">s</button> <button class="keyboard-key" data-key="d" data-shift="D">d</button> <button class="keyboard-key" data-key="f" data-shift="F">f</button> <button class="keyboard-key" data-key="g" data-shift="G">g</button> <button class="keyboard-key" data-key="h" data-shift="H">h</button> <button class="keyboard-key" data-key="j" data-shift="J">j</button> <button class="keyboard-key" data-key="k" data-shift="K">k</button> <button class="keyboard-key" data-key="l" data-shift="L">l</button> </div>
+            <div class="keyboard-row"> <button class="keyboard-key key-shift" id="shiftLetters">⇧</button> <button class="keyboard-key" data-key="z" data-shift="Z">z</button> <button class="keyboard-key" data-key="x" data-shift="X">x</button> <button class="keyboard-key" data-key="c" data-shift="C">c</button> <button class="keyboard-key" data-key="v" data-shift="V">v</button> <button class="keyboard-key" data-key="b" data-shift="B">b</button> <button class="keyboard-key" data-key="n" data-shift="N">n</button> <button class="keyboard-key" data-key="m" data-shift="M">m</button> <button class="keyboard-key key-backspace" data-key="Backspace">⌫</button> </div>
+            <div class="keyboard-row"> <button class="keyboard-key key-mode-switch" data-target-mode="numbers">?123</button> <button class="keyboard-key" data-key=",">,</button> <button class="keyboard-key key-space" data-key=" ">Space</button> <button class="keyboard-key" data-key=".">.</button> <button class="keyboard-key key-enter" data-key="Enter">⏎</button> </div>
+        </div>
+        <!-- === Numbers/Symbols Layer === -->
+        <div class="keyboard-layer" id="layer-numbers">
+            <div class="keyboard-row"> <button class="keyboard-key" data-key="1">1</button> <button class="keyboard-key" data-key="2">2</button> <button class="keyboard-key" data-key="3">3</button> <button class="keyboard-key" data-key="4">4</button> <button class="keyboard-key" data-key="5">5</button> <button class="keyboard-key" data-key="6">6</button> <button class="keyboard-key" data-key="7">7</button> <button class="keyboard-key" data-key="8">8</button> <button class="keyboard-key" data-key="9">9</button> <button class="keyboard-key" data-key="0">0</button> </div>
+            <div class="keyboard-row"> <button class="keyboard-key" data-key="@">@</button> <button class="keyboard-key" data-key="#">#</button> <button class="keyboard-key" data-key="$">$</button> <button class="keyboard-key" data-key="_">_</button> <button class="keyboard-key" data-key="&">&</button> <button class="keyboard-key" data-key="-">-</button> <button class="keyboard-key" data-key="+">+</button> <button class="keyboard-key" data-key="(">(</button> <button class="keyboard-key" data-key=")">)</button> <button class="keyboard-key" data-key="/">/</button> </div>
+            <div class="keyboard-row"> <button class="keyboard-key key-mode-switch" data-target-mode="symbols2">=\<</button> <button class="keyboard-key" data-key="*">*</button> <button class="keyboard-key" data-key='"'>"</button> <button class="keyboard-key" data-key="'">'</button> <button class="keyboard-key" data-key=":">:</button> <button class="keyboard-key" data-key=";">;</button> <button class="keyboard-key" data-key="!">!</button> <button class="keyboard-key" data-key="?">?</button> <button class="keyboard-key key-backspace" data-key="Backspace">⌫</button> </div>
+            <div class="keyboard-row"> <button class="keyboard-key key-mode-switch" data-target-mode="letters">ABC</button> <button class="keyboard-key" data-key=",">,</button> <button class="keyboard-key key-space" data-key=" ">Space</button> <button class="keyboard-key" data-key=".">.</button> <button class="keyboard-key key-enter" data-key="Enter">⏎</button> </div>
+        </div>
+        <!-- === Symbols Layer 2 === -->
+        <div class="keyboard-layer" id="layer-symbols2">
+             <div class="keyboard-row"> <button class="keyboard-key" data-key="~">~</button> <button class="keyboard-key" data-key="`">`</button> <button class="keyboard-key" data-key="|">|</button> <button class="keyboard-key" data-key="•">×</button> <button class="keyboard-key" data-key="€">€</button> <button class="keyboard-key" data-key="£">£</button> <button class="keyboard-key" data-key="¥">¥</button> <button class="keyboard-key" data-key="^">^</button> <button class="keyboard-key" data-key="°">°</button> <button class="keyboard-key" data-key="=">=</button> </div>
+             <div class="keyboard-row"> <button class="keyboard-key" data-key="%">%</button> <button class="keyboard-key" data-key="©">©</button> <button class="keyboard-key" data-key="®">®</button> <button class="keyboard-key" data-key="™">™</button> <button class="keyboard-key" data-key="✓">✓</button> <button class="keyboard-key" data-key="[">[</button> <button class="keyboard-key" data-key="]">]</button> <button class="keyboard-key" data-key="{">{</button> <button class="keyboard-key" data-key="}">}</button> <button class="keyboard-key" data-key="\">\</button> </div>
+             <div class="keyboard-row"> <button class="keyboard-key key-mode-switch" data-target-mode="numbers">?123</button> <span style="flex-grow: 8;"></span> <button class="keyboard-key key-backspace" data-key="Backspace">⌫</button> </div>
+             <div class="keyboard-row"> <button class="keyboard-key key-mode-switch" data-target-mode="letters">ABC</button> <button class="keyboard-key" data-key=",">,</button> <button class="keyboard-key key-space" data-key=" ">Space</button> <button class="keyboard-key" data-key=".">.</button> <button class="keyboard-key key-enter" data-key="Enter">⏎</button> </div>
+        </div>
+    </div>
+
+    <script>
+        const socket = io();
+        const touchSurface = document.getElementById('touchSurface');
+        const virtualKeyboard = document.getElementById('virtualKeyboard');
+        const introAnimation = document.getElementById('introAnimation'); // Animation overlay
+
+        // Layer references
+        const layers = {
+            letters: document.getElementById('layer-letters'),
+            numbers: document.getElementById('layer-numbers'),
+            symbols2: document.getElementById('layer-symbols2')
+        };
+
+        // Key references
+        const shiftLettersKey = document.getElementById('shiftLetters');
+        const allKeysWithData = virtualKeyboard.querySelectorAll('.keyboard-key[data-key]'); // All functional keys
+        const letterKeys = layers.letters.querySelectorAll('.keyboard-key[data-key]'); // Keys specifically in the letters layer
+        const modeSwitchKeys = virtualKeyboard.querySelectorAll('.key-mode-switch');
+
+        let prevX = null; let prevY = null;
+        const activePointers = new Map();
+
+        // --- State ---
+        let isShiftActive = false;
+        let currentMode = 'letters'; // Start with letters
+        let animationStopped = false; // Track animation state
+
+        // Constants for tap detection
+        const TAP_DURATION_THRESHOLD = 250; // ms
+        const TAP_MOVE_THRESHOLD = 10;      // pixels
+
+        // --- Function to Update Keyboard Display ---
+        function updateKeyboardDisplay() {
+            // Show/Hide Layers
+            for (const mode in layers) {
+                if (layers[mode]) { layers[mode].style.display = (mode === currentMode) ? 'flex' : 'none'; }
+            }
+            // Update letter keys based on shift
+            if (currentMode === 'letters') {
+                letterKeys.forEach(key => {
+                    const baseKey = key.dataset.key;
+                    const shiftKey = key.dataset.shift;
+                    if (baseKey.length === 1 || baseKey === ' ') {
+                         key.textContent = (isShiftActive && shiftKey) ? shiftKey : ((baseKey === ' ') ? 'Space' : baseKey);
+                    }
+                });
+                if (shiftLettersKey) { shiftLettersKey.classList.toggle('active', isShiftActive); }
+            } else {
+                 if (shiftLettersKey) { shiftLettersKey.classList.remove('active'); }
+            }
+        }
+
+        // --- Function to Stop Animation ---
+        function stopIntroAnimation() {
+            if (!animationStopped) {
+                console.log("First interaction, stopping intro animation.");
+                introAnimation.classList.add('hidden');
+                setTimeout(() => { if (introAnimation.parentNode) { introAnimation.style.display = 'none'; } }, 500);
+                animationStopped = true;
+            }
+        }
+
+        // --- Pointer Events ---
+        touchSurface.addEventListener('pointerdown', (event) => {
+            stopIntroAnimation(); // Stop animation
+            if (event.button === 2) { event.preventDefault(); socket.emit('tap', { source: 'pointer_button_right' }); return; }
+            if (event.isPrimary) {
+                 event.preventDefault();
+                 try { touchSurface.setPointerCapture(event.pointerId); } catch(e) {}
+                 activePointers.set(event.pointerId, { startTime: Date.now(), startX: event.clientX, startY: event.clientY, prevX: event.clientX, prevY: event.clientY });
+            }
+        });
+
+        touchSurface.addEventListener('pointermove', (event) => {
+            stopIntroAnimation(); // Stop animation
+            if (!activePointers.has(event.pointerId)) return;
+            event.preventDefault();
+            const pointerState = activePointers.get(event.pointerId);
+            const currentX = event.clientX; const currentY = event.clientY;
+            const deltaX = currentX - pointerState.prevX; const deltaY = currentY - pointerState.prevY;
+            if (deltaX !== 0 || deltaY !== 0) socket.emit('cursor_move', { deltaX, deltaY });
+            pointerState.prevX = currentX; pointerState.prevY = currentY;
+        });
+
+        const handlePointerEnd = (event) => {
+            stopIntroAnimation(); // Stop animation
+            if (activePointers.has(event.pointerId)) {
+                const pointerState = activePointers.get(event.pointerId);
+                const duration = Date.now() - pointerState.startTime;
+                let distance = 0;
+                if (duration < TAP_DURATION_THRESHOLD) { distance = Math.sqrt((event.clientX - pointerState.startX)**2 + (event.clientY - pointerState.startY)**2); }
+
+                if (duration < TAP_DURATION_THRESHOLD && distance < TAP_MOVE_THRESHOLD) {
+                    console.log('>>> Tap detected (single-pointer) - Emitting socket event!');
+                    socket.emit('tap', { source: 'single_tap' });
+                    // No preventDefault here usually needed for taps
+                }
+                try { touchSurface.releasePointerCapture(event.pointerId); } catch(e) {}
+                activePointers.delete(event.pointerId);
+            }
+        };
+        touchSurface.addEventListener('pointerup', handlePointerEnd);
+        touchSurface.addEventListener('pointercancel', handlePointerEnd);
+        touchSurface.addEventListener('pointerleave', (event) => { // Just cleanup
+             if (activePointers.has(event.pointerId)) {
+                try { touchSurface.releasePointerCapture(event.pointerId); } catch(e) {}
+                activePointers.delete(event.pointerId);
+            }
+        });
+
+
+        // --- Touch Events (for 2-finger tap) ---
+        let touchStartTime_2f = 0; let touchStartCount_2f = 0; let twoFingerTapDetected = false;
+        touchSurface.addEventListener('touchstart', (event) => {
+            stopIntroAnimation(); // Stop animation
+            touchStartCount_2f = event.touches.length;
+            twoFingerTapDetected = false;
+            if (touchStartCount_2f === 2) { event.preventDefault(); touchStartTime_2f = Date.now(); }
+        }, { passive: false });
+         touchSurface.addEventListener('touchend', (event) => {
+            stopIntroAnimation(); // Stop animation
+             if (touchStartCount_2f === 2 && !twoFingerTapDetected) {
+                 const tapDuration_2f = Date.now() - touchStartTime_2f;
+                 if (tapDuration_2f < 350) {
+                     console.log('>>> Tap detected (two-finger) - Emitting socket event!');
+                     socket.emit('tap', { source: 'two_finger' });
+                     twoFingerTapDetected = true;
+                     event.preventDefault();
+                 }
+             }
+             if (event.touches.length === 0) { touchStartCount_2f = 0; touchStartTime_2f = 0; twoFingerTapDetected = false; }
+        }, { passive: false });
+        touchSurface.addEventListener('contextmenu', (event) => { event.preventDefault(); });
+
+
+        // --- Virtual Keyboard Input Logic ---
+        virtualKeyboard.addEventListener('click', (event) => {
+            stopIntroAnimation(); // Also stop animation if user interacts with keyboard first
+            const target = event.target.closest('.keyboard-key');
+            if (!target) return;
+
+            // Mode Switch
+            if (target.classList.contains('key-mode-switch')) {
+                const targetMode = target.dataset.targetMode;
+                if (targetMode && layers[targetMode]) { currentMode = targetMode; isShiftActive = false; updateKeyboardDisplay(); }
+                return;
+            }
+            // Shift Key
+            if (target === shiftLettersKey && currentMode === 'letters') {
+                isShiftActive = !isShiftActive; updateKeyboardDisplay(); return;
+            }
+            // Other Keys
+            if (target.dataset.key) {
+                let keyToSend = (currentMode === 'letters' && isShiftActive && target.dataset.shift) ? target.dataset.shift : target.dataset.key;
+                socket.emit('key_input', { key: keyToSend });
+                if (navigator.vibrate) { navigator.vibrate(50); }
+                // Momentary Shift
+                if (isShiftActive && currentMode === 'letters' && target.dataset.key.length === 1) {
+                    isShiftActive = false; updateKeyboardDisplay();
+                }
+            }
+        });
+
+        // --- Connection Events ---
+        socket.on('connect', () => { console.log('Connected...'); socket.emit('register_controller'); isShiftActive = false; currentMode = 'letters'; updateKeyboardDisplay(); });
+        socket.on('disconnect', () => { console.log('Disconnected...'); activePointers.clear(); isShiftActive = false; currentMode = 'letters'; updateKeyboardDisplay(); animationStopped = false; /* Optional: Reset animation for next connect? */ });
+
+        // --- Initial Keyboard Display Setup ---
+        updateKeyboardDisplay();
+
+    </script>
+</body>
+</html>

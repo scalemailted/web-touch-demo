@@ -1,0 +1,293 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Full Page Cursor Control</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode/build/qrcode.min.js"></script>
+    <style>
+        /* Basic styling */
+        html { box-sizing: border-box; }
+        *, *:before, *:after { box-sizing: inherit; }
+        body { margin: 0; min-height: 100vh; background-color: #f0f0f0; font-family: sans-serif; position: relative; overflow: hidden; display: flex; flex-direction: column; }
+        #cursor { width: 20px; height: 20px; border-radius: 50%; background-color: red; position: absolute; transform: translate(-50%, -50%); pointer-events: none; display: none; z-index: 9999; transition: background-color 0.1s ease; }
+        #cursor.visible { display: block; }
+        .main-content { padding: 20px; flex-grow: 1; }
+        #inputArea { padding: 20px; background-color: #e0e0e0; border-top: 1px solid #ccc; flex-shrink: 0; }
+        /* Make labels for text inputs block again */
+        #inputArea label[for="textField"],
+        #inputArea label[for="textArea"] { display: block; margin-bottom: 5px; }
+        #inputArea input[type="text"], #inputArea textarea { width: 95%; padding: 8px; margin-bottom: 10px; border: 1px solid #aaa; border-radius: 4px; font-size: 16px; caret-color: auto; }
+        #inputArea textarea { min-height: 80px; resize: vertical; }
+        .clickable-box { width: 150px; height: 80px; background-color: lightblue; border: 1px solid blue; display: flex; justify-content: center; align-items: center; margin-top: 20px; cursor: pointer; user-select: none; transition: background-color 0.2s; }
+        .clickable-box:hover { background-color: lightcoral; }
+
+        /* Grouping for radios/checkboxes */
+        .form-group { margin-bottom: 15px; padding: 10px; border: 1px dashed #bbb; border-radius: 4px; }
+        .form-group legend { font-weight: bold; padding: 0 5px; }
+        /* Labels within form groups are inline */
+        .form-group label { display: inline-block; margin-right: 15px; margin-bottom: 0; vertical-align: middle; cursor: pointer; }
+        .form-group input[type="radio"], .form-group input[type="checkbox"] { margin-right: 5px; vertical-align: middle; }
+
+        /* === Focus Styles (For Text Inputs/Areas Only) === */
+        input[type="text"]:focus, textarea:focus,
+        input[type="text"].manual-focus, textarea.manual-focus {
+            outline: 2px solid blue;
+            outline-offset: 2px;
+            box-shadow: 0 0 5px rgba(0, 0, 255, 0.5);
+        }
+
+        /* === Manual Hover Styles === */
+        /* Apply outline to interactive elements EXCEPT radio/checkbox inputs */
+        button.manual-hover, a.manual-hover, textarea.manual-hover,
+        input[type="text"].manual-hover, input[type="button"].manual-hover,
+        input[type="submit"].manual-hover, input[type="reset"].manual-hover,
+        input[type="image"].manual-hover,
+        select.manual-hover,
+        .clickable-box.manual-hover {
+            outline: 2px solid green;
+            outline-offset: 2px;
+        }
+        /* Style labels associated with hovered radio/checkbox OR the label itself if interactive */
+        label.manual-hover {
+             text-decoration: underline;
+             color: green;
+        }
+        /* Prevent hover outline overriding focus outline on text inputs */
+        input[type="text"].manual-focus.manual-hover,
+        textarea.manual-focus.manual-hover {
+             outline-color: blue;
+             box-shadow: 0 0 5px rgba(0, 0, 255, 0.5); /* Keep focus shadow */
+        }
+
+
+        /* === QR Code Styling === */
+        #qrCodeContainer { position: absolute; top: 15px; right: 15px; background-color: white; padding: 8px; border: 1px solid #ccc; box-shadow: 3px 3px 8px rgba(0,0,0,0.2); z-index: 500; }
+        #qrCodeContainer p { margin: 0 0 5px 0; font-size: 0.8em; text-align: center; color: #555; }
+        #qrCodeContainer canvas { display: block; }
+
+    </style>
+</head>
+<body>
+    <div id="qrCodeContainer"> <p>Scan for Controller</p> </div>
+    <div id="cursor"></div>
+    <div class="main-content">
+        <h1>Full Page Control Demo</h1>
+        <p>Move cursor anywhere on the page using the controller. Tap to click elements.</p>
+        <p>Use the keyboard on the controller to type into fields below after clicking them.</p>
+        <div class="clickable-box" id="testBox">Click Me!</div>
+    </div>
+    <div id="inputArea">
+        <form id="testForm" onsubmit="window.location.reload();">
+             <label for="textField">Text Input:</label>
+             <input type="text" id="textField" name="textField" placeholder="Try clicking here...">
+             <label for="textArea">Text Area:</label>
+             <textarea id="textArea" name="textArea" placeholder="And here..."></textarea>
+             <fieldset class="form-group"> <legend>Choose an Option:</legend> <input type="radio" id="radioOpt1" name="radioGroup" value="opt1"> <label for="radioOpt1">Option 1</label> <input type="radio" id="radioOpt2" name="radioGroup" value="opt2" checked> <label for="radioOpt2">Option 2</label> <input type="radio" id="radioOpt3" name="radioGroup" value="opt3"> <label for="radioOpt3">Option 3</label> </fieldset>
+             <fieldset class="form-group"> <legend>Select Items:</legend> <input type="checkbox" id="checkItem1" name="checkItem1" value="item1"> <label for="checkItem1">Item A</label> <input type="checkbox" id="checkItem2" name="checkItem2" value="item2"> <label for="checkItem2">Item B</label> <input type="checkbox" id="checkItem3" name="checkItem3" value="item3" checked> <label for="checkItem3">Item C</label> </fieldset>
+             <button type="submit">Submit Form</button>
+        </form>
+    </div>
+
+    <script>
+        const socket = io();
+        const cursorElement = document.getElementById('cursor');
+        const qrCodeContainer = document.getElementById('qrCodeContainer');
+
+        let windowWidth = window.innerWidth; let windowHeight = window.innerHeight;
+        let cursorX = windowWidth / 2; let cursorY = windowHeight / 2;
+        let cursorVisible = false; const sensitivity = 2.0;
+
+        const manualFocusElements = document.querySelectorAll('#inputArea input[type="text"], #inputArea textarea');
+
+        // --- State for Manual Hover ---
+        let lastHoveredInteractiveElement = null;
+        let lastHoveredAssociatedLabels = [];
+
+        // --- Helper Functions ---
+        function updateCursorPosition() { cursorElement.style.left = `${cursorX}px`; cursorElement.style.top = `${cursorY}px`; }
+        function updateCursorVisibility() { cursorElement.classList.toggle('visible', cursorVisible); }
+        window.addEventListener('resize', () => { windowWidth = window.innerWidth; windowHeight = window.innerHeight; cursorX = Math.max(0, Math.min(windowWidth, cursorX)); cursorY = Math.max(0, Math.min(windowHeight, cursorY)); updateCursorPosition(); handleManualHover(); });
+        function removeManualFocus() { manualFocusElements.forEach(input => input.classList.remove('manual-focus')); }
+
+        // --- removeManualHover (from hover version) ---
+        function removeManualHover() {
+            if (lastHoveredInteractiveElement) {
+                lastHoveredInteractiveElement.classList.remove('manual-hover');
+            }
+            lastHoveredAssociatedLabels.forEach(label => label.classList.remove('manual-hover'));
+            lastHoveredInteractiveElement = null;
+            lastHoveredAssociatedLabels = [];
+        }
+
+        // --- isInteractiveForHover (from hover version) ---
+        function isInteractiveForHover(element) {
+            if (!element) return false;
+            const tagName = element.tagName;
+            const type = element.type ? element.type.toLowerCase() : null;
+            if (tagName === 'LABEL' && element.htmlFor) {
+                const input = document.getElementById(element.htmlFor);
+                // Labels for text inputs/areas are NOT primary hover targets themselves
+                if (input && (input.type === 'text' || input.tagName === 'TEXTAREA')) { return false; }
+                 return true; // Labels for radios, checkboxes etc. ARE hover targets
+            }
+            // Check other common interactive elements
+            if (tagName === 'BUTTON' || tagName === 'A' || tagName === 'TEXTAREA' ||
+                (tagName === 'INPUT' && (type === 'text' || type === 'button' || type === 'submit' || type === 'reset' || type === 'radio' || type === 'checkbox' || type === 'image')) ||
+                tagName === 'SELECT' ||
+                element.classList.contains('clickable-box')
+               ) { return true; }
+            return false;
+        }
+
+        // --- handleManualHover (from hover version) ---
+        function handleManualHover() {
+            if (!cursorVisible) return;
+            let currentElement = document.elementFromPoint(cursorX, cursorY);
+            let targetInteractiveElement = null;
+            let targetAssociatedLabels = [];
+
+            if (currentElement && currentElement.tagName === 'LABEL' && currentElement.htmlFor) {
+                 const input = document.getElementById(currentElement.htmlFor);
+                 // If label is for radio/checkbox, the label is the hover target
+                 if (input && isInteractiveForHover(input) && input.type !== 'text' && input.tagName !== 'TEXTAREA') {
+                      targetInteractiveElement = currentElement;
+                 } else if (input && (input.type === 'text' || input.tagName === 'TEXTAREA')) {
+                     // If label is for text input, hover the input instead
+                     targetInteractiveElement = input;
+                 }
+            } else if (isInteractiveForHover(currentElement)) {
+                 targetInteractiveElement = currentElement;
+                 // If hovering a radio/checkbox input, find its associated labels to hover them too
+                 if (currentElement.id && (currentElement.type === 'radio' || currentElement.type === 'checkbox')) {
+                      targetAssociatedLabels = Array.from(document.querySelectorAll(`label[for="${currentElement.id}"]`));
+                 }
+            }
+
+            // Compare with the last hovered state
+            if (targetInteractiveElement !== lastHoveredInteractiveElement) {
+                removeManualHover(); // Clear previous effects
+                if (targetInteractiveElement) {
+                    // Apply hover to the main target element
+                    targetInteractiveElement.classList.add('manual-hover');
+                    lastHoveredInteractiveElement = targetInteractiveElement;
+                    // Apply hover to any associated labels (e.g., for radio/checkbox inputs)
+                    targetAssociatedLabels.forEach(label => label.classList.add('manual-hover'));
+                    lastHoveredAssociatedLabels = targetAssociatedLabels;
+                }
+            } else if (targetInteractiveElement === lastHoveredInteractiveElement) {
+                 // Still hovering the same main element, ensure associated labels are correct
+                 lastHoveredAssociatedLabels.forEach(label => { if (!targetAssociatedLabels.includes(label)) { label.classList.remove('manual-hover'); } });
+                 targetAssociatedLabels.forEach(label => { if (!lastHoveredAssociatedLabels.includes(label)) { label.classList.add('manual-hover'); } });
+                 lastHoveredAssociatedLabels = targetAssociatedLabels;
+            }
+        }
+
+
+        // --- Socket.IO Handlers ---
+        socket.on('connect', () => { console.log('Connected...'); socket.emit('register_app'); /*...*/ removeManualFocus(); removeManualHover(); });
+        socket.on('disconnect', () => { console.log('Disconnected...'); cursorVisible = false; updateCursorVisibility(); removeManualFocus(); removeManualHover(); });
+        socket.on('cursor_move', (data) => {
+             if (!cursorVisible) return;
+             const deltaX = data.deltaX || 0; const deltaY = data.deltaY || 0;
+             cursorX += deltaX * sensitivity; cursorY += deltaY * sensitivity;
+             cursorX = Math.max(0, Math.min(windowWidth, cursorX)); cursorY = Math.max(0, Math.min(windowHeight, cursorY));
+             updateCursorPosition();
+             handleManualHover(); // Update hover effect
+        });
+
+        // --- TAP HANDLER (Using Simple Focus/Click + Manual Highlight Class) ---
+        // This uses the logic from the version where text input worked correctly
+        socket.on('tap', (data) => {
+            let elementUnderCursor = document.elementFromPoint(cursorX, cursorY);
+            // console.log('Tap received. Initial element:', elementUnderCursor);
+
+            // Handle label clicks - Target the INPUT associated with the LABEL
+            let finalTargetElement = elementUnderCursor;
+            if (elementUnderCursor && elementUnderCursor.tagName === 'LABEL' && elementUnderCursor.htmlFor) {
+                const correspondingInput = document.getElementById(elementUnderCursor.htmlFor);
+                if (correspondingInput) {
+                     // console.log('Tapped label, targeting input:', correspondingInput);
+                     finalTargetElement = correspondingInput;
+                }
+            }
+
+            removeManualFocus(); // Clear previous manual focus visual class
+            let focusSetOnInput = false; // Track if focus succeeded on a text input/area
+
+            if (finalTargetElement) {
+                const isTargetTextInput = (finalTargetElement.tagName === 'INPUT' && finalTargetElement.type === 'text') || finalTargetElement.tagName === 'TEXTAREA';
+
+                // Perform focus AND click (Order matters less here, browser handles it)
+                if (typeof finalTargetElement.focus === 'function') {
+                    // console.log('Attempting focus:', finalTargetElement);
+                    finalTargetElement.focus({ preventScroll: true });
+                    // Check *after* potential click if logical focus is set AND it's a text input
+                    focusSetOnInput = (document.activeElement === finalTargetElement) && isTargetTextInput;
+                }
+                if (typeof finalTargetElement.click === 'function') {
+                     // console.log('Attempting click:', finalTargetElement);
+                     finalTargetElement.click(); // Crucial for buttons, radios, checkboxes
+                }
+
+                // Re-check focus state *after* click, as click might change focus
+                focusSetOnInput = (document.activeElement === finalTargetElement) && isTargetTextInput;
+                if (focusSetOnInput){
+                     console.log('Logical focus successful on text input. Active:', document.activeElement);
+                }
+
+                // Add manual focus class *if* it's a text input/area AND focus is set
+                 if (isTargetTextInput && focusSetOnInput) {
+                    // console.log('Applying .manual-focus class to:', finalTargetElement);
+                    finalTargetElement.classList.add('manual-focus');
+                 }
+
+                handleManualHover(); // Update hover state after tap actions
+
+                cursorElement.style.backgroundColor = 'blue';
+                setTimeout(() => { cursorElement.style.backgroundColor = 'red'; }, 150);
+
+            } else {
+                // Tap missed any element
+                const activeElement = document.activeElement;
+                if (activeElement && typeof activeElement.blur === 'function' && activeElement !== document.body) { activeElement.blur(); }
+                cursorElement.style.backgroundColor = 'darkred';
+                setTimeout(() => { cursorElement.style.backgroundColor = 'red'; }, 150);
+                handleManualHover(); // Update hover state after tap miss
+            }
+        });
+
+
+        socket.on('show_cursor', () => { if (!cursorVisible) { cursorVisible = true; updateCursorVisibility(); } });
+        socket.on('hide_cursor', () => { if (cursorVisible) { cursorVisible = false; updateCursorVisibility(); removeManualFocus(); removeManualHover(); } });
+        socket.on('key_input', (data) => { /* ... same KEY INPUT logic ... */
+             const key = data.key; const activeElement = document.activeElement;
+             if (activeElement && (activeElement.tagName === 'INPUT' || activeElement.tagName === 'TEXTAREA')) {
+                 const inputElement = activeElement; const start = inputElement.selectionStart; const end = inputElement.selectionEnd; const currentValue = inputElement.value;
+                 if (key === 'Backspace') { if (start === end && start > 0) { inputElement.value = currentValue.substring(0, start - 1) + currentValue.substring(end); inputElement.selectionStart = inputElement.selectionEnd = start - 1; } else if (start < end) { inputElement.value = currentValue.substring(0, start) + currentValue.substring(end); inputElement.selectionStart = inputElement.selectionEnd = start; } }
+                 else if (key === 'Enter') { if (inputElement.tagName === 'TEXTAREA') { inputElement.value = currentValue.substring(0, start) + '\n' + currentValue.substring(end); inputElement.selectionStart = inputElement.selectionEnd = start + 1; } else if (inputElement.form) { const submitButton = inputElement.form.querySelector('button[type="submit"], input[type="submit"]'); if (submitButton) { submitButton.click(); } else { if (typeof inputElement.form.requestSubmit === 'function') { inputElement.form.requestSubmit(); } else { inputElement.form.submit(); }} } }
+                 else if (key.length === 1 || key === ' ') { inputElement.value = currentValue.substring(0, start) + key + currentValue.substring(end); inputElement.selectionStart = inputElement.selectionEnd = start + key.length; }
+                 else { console.log('Unhandled special key:', key); }
+                 inputElement.dispatchEvent(new Event('input', { bubbles: true, cancelable: true }));
+             } else { console.log('Key input received, but no suitable element focused.'); }
+         });
+        const testBox = document.getElementById('testBox'); // --- Example Click Handler ---
+        if(testBox) { testBox.addEventListener('click', () => {  testBox.textContent = 'Clicked!'; setTimeout(() => { testBox.textContent = 'Click Me!' }, 1500); }); }
+
+        // --- QR Code Generation Logic ---
+        function generateControllerQRCode() { 
+             const controllerUrl = window.location.origin + '/controller.html';
+             console.log('Generating QR Code for:', controllerUrl);
+             qrCodeContainer.innerHTML = '<p>Scan for Controller</p>';
+             QRCode.toCanvas(document.createElement('canvas'), controllerUrl, { width: 128, margin: 1 }, (err, canvas) => { if (err) { console.error("QR Code Generation Error:", err); qrCodeContainer.innerHTML += '<p style="color: red;">Error generating QR code.</p>'; } else { qrCodeContainer.appendChild(canvas); console.log('QR Code Generated.'); } });
+        }
+
+        // --- Initial Setup ---
+        updateCursorPosition();
+        updateCursorVisibility();
+        generateControllerQRCode();
+
+    </script>
+</body>
+</html>

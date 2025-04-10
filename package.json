@@ -1,0 +1,26 @@
+{
+    "name": "node-webtouch",
+    "version": "1.0.0",
+    "description": "Node.js version of the Web Touch Controller and App Display",
+    "main": "server.js",
+    "scripts": {
+      "start": "node server.js",
+      "dev": "node server.js" 
+    },
+    "engines": {
+      "node": "*" 
+    },
+    "dependencies": {
+      "express": "*", 
+      "socket.io": "*" 
+    },
+    "keywords": [
+      "websocket",
+      "socket.io",
+      "express",
+      "canvas",
+      "touch"
+    ],
+    "author": "",
+    "license": "MIT"
+  }
