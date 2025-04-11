@@ -4,152 +4,175 @@ const express = require('express');
 const http = require('http');
 const { Server } = require("socket.io");
 const path = require('path');
-// REMOVED: const shortid = require('shortid');
 
 const app = express();
 const server = http.createServer(app);
 const io = new Server(server, {
-    cors: {
-        origin: "*",
-        methods: ["GET", "POST"]
-    }
+    cors: { origin: "*", methods: ["GET", "POST"] }
 });
 
 const PORT = process.env.PORT || 3000;
 
-// --- Room Code Generation ---
 const CODE_LENGTH = 4;
 const ALPHABET = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+function generateRoomCode() { /* ... */ let code = ''; for (let i = 0; i < CODE_LENGTH; i++) { code += ALPHABET.charAt(Math.floor(Math.random() * ALPHABET.length)); } return code; }
 
-function generateRoomCode() {
-    let code = '';
-    for (let i = 0; i < CODE_LENGTH; i++) {
-        code += ALPHABET.charAt(Math.floor(Math.random() * ALPHABET.length));
+const roomStates = new Map();
+const adminSockets = new Set();
+
+function createInitialRoomState(appSocketId) { /* ... same ... */ return { appSocketId: appSocketId, controllerSocketIds: new Set(), lastKnownCursor: { x: 400, y: 300, isVisible: false }, lastKnownFocusSelector: null, lastKnownFocusValue: '', controllerState: { keyboardMode: 'letters', isShiftActive: false }, sensitivity: 2.0 }; }
+function getCurrentRoomAppState(roomState) { /* ... same ... */ if (!roomState) return {}; return { cursor: roomState.lastKnownCursor, focusedElementSelector: roomState.lastKnownFocusSelector, focusedElementValue: roomState.lastKnownFocusValue }; }
+function broadcastControllerStateToRoom(roomCode) { /* ... same ... */ const roomState = roomStates.get(roomCode); if (!roomState) return; const stateToSend = { controllerState: roomState.controllerState }; roomState.controllerSocketIds.forEach(sid => { io.to(sid).emit('update_controller_state', stateToSend); }); }
+
+// **MODIFIED:** Broadcast to Admins (can target specific admin if needed)
+function broadcastToAdmins(eventName, data, targetAdminSid = null) {
+    if (targetAdminSid) {
+        io.to(targetAdminSid).emit(eventName, data);
+    } else {
+        adminSockets.forEach(adminSid => {
+            io.to(adminSid).emit(eventName, data);
+        });
     }
-    return code;
 }
 
-// --- Per-Room State Store ---
-// Map<RoomCode (4-letter UPPERCASE), RoomState>
-const roomStates = new Map();
+// **NEW:** Helper to get room list data for admin (includes controller status)
+function getAdminRoomListData() {
+    const roomListData = [];
+    for (const [roomCode, roomState] of roomStates.entries()) {
+        roomListData.push({
+            code: roomCode,
+            hasControllers: roomState.controllerSocketIds.size > 0
+        });
+    }
+    return roomListData;
+}
 
-// Function to create initial state for a new room
-function createInitialRoomState(appSocketId) { /* ... same ... */ return { appSocketId: appSocketId, controllerSocketIds: new Set(), lastKnownCursor: { x: 400, y: 300, isVisible: false }, lastKnownFocusSelector: null, lastKnownFocusValue: '', controllerState: { keyboardMode: 'letters', isShiftActive: false }, sensitivity: 2.0 }; }
-// --- Helper Functions ---
-function getInitialStateForApp(roomState) { /* ... same ... */ if (!roomState) return {}; return { cursor: roomState.lastKnownCursor, focusedElementSelector: roomState.lastKnownFocusSelector, focusedElementValue: roomState.lastKnownFocusValue, hoveredElementSelector: null }; }
-function broadcastControllerStateToRoom(roomCode) { /* ... same logic, uses roomCode ... */ const roomState = roomStates.get(roomCode); if (!roomState) return; const stateToSend = { controllerState: roomState.controllerState }; roomState.controllerSocketIds.forEach(sid => { io.to(sid).emit('update_controller_state', stateToSend); }); }
 
-// --- Express Routes ---
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('/', (req, res) => { res.sendFile(path.join(__dirname, 'public', 'app.html')); });
 app.get('/controller', (req, res) => { res.sendFile(path.join(__dirname, 'public', 'controller.html')); });
+app.get('/admin', (req, res) => { /* ... */ res.sendFile(path.join(__dirname, 'public', 'admin.html')); });
 
-// --- Socket.IO Logic ---
 io.on('connection', (socket) => {
     console.log(`Client connected: ${socket.id}`);
-    let currentRoomCode = null; // Track the 4-letter room code
+    let currentRoomCode = null;
+    let isAdmin = false;
 
-    // --- Disconnection ---
     socket.on('disconnect', () => {
-        console.log(`Client disconnected: ${socket.id}, From Room: ${currentRoomCode}`);
-        if (currentRoomCode) {
-            const roomState = roomStates.get(currentRoomCode); // Lookup by code
+        console.log(`Client disconnected: ${socket.id}, From Room: ${currentRoomCode}, IsAdmin: ${isAdmin}`);
+        if (isAdmin) {
+            adminSockets.delete(socket.id);
+            console.log(`Admin disconnected: ${socket.id}. Remaining admins: ${adminSockets.size}`);
+        } else if (currentRoomCode) {
+            const roomState = roomStates.get(currentRoomCode);
             if (roomState) {
                 if (socket.id === roomState.appSocketId) {
+                    // ... App disconnect logic ...
                     console.log(`App owner (Socket: ${socket.id}) of room ${currentRoomCode} disconnected.`);
-                     roomState.controllerSocketIds.forEach(controllerSid => { /* ... inform controllers ... */ const controllerSocket = io.sockets.sockets.get(controllerSid); if(controllerSocket) { console.log(`Informing controller ${controllerSid} in room ${currentRoomCode} about app disconnect.`); controllerSocket.emit('app_disconnected'); controllerSocket.leave(currentRoomCode); } });
+                    io.to(currentRoomCode).emit('app_disconnected');
                     roomStates.delete(currentRoomCode);
                     console.log(`Room ${currentRoomCode} removed.`);
+                    broadcastToAdmins('room_destroyed', currentRoomCode); // Inform admins room is gone
                 } else if (roomState.controllerSocketIds.has(socket.id)) {
+                    // ... Controller disconnect logic ...
                     roomState.controllerSocketIds.delete(socket.id);
                     console.log(`Controller ${socket.id} left room ${currentRoomCode}. Remaining: ${roomState.controllerSocketIds.size}`);
-                    if (roomState.controllerSocketIds.size === 0 && roomState.lastKnownCursor.isVisible) { /* ... update visibility ... */ roomState.lastKnownCursor.isVisible = false; console.log(`Last controller left room ${currentRoomCode}. Updating app cursor state.`); if(roomState.appSocketId) { io.to(roomState.appSocketId).emit('set_cursor_visibility', false); } }
+
+                    const wasLastController = roomState.controllerSocketIds.size === 0;
+
+                    // Update cursor visibility if needed
+                    if (wasLastController && roomState.lastKnownCursor.isVisible) {
+                        roomState.lastKnownCursor.isVisible = false;
+                        console.log(`Last controller left room ${currentRoomCode}. Broadcasting cursor visibility.`);
+                        io.to(currentRoomCode).emit('set_cursor_visibility', false);
+                    }
+                    // *** Inform admins about controller status change ***
+                    broadcastToAdmins('room_controller_status', {
+                        code: currentRoomCode,
+                        hasControllers: !wasLastController // false if it was the last one
+                    });
                 }
-            } else { console.log(`Disconnected socket ${socket.id} claimed room ${currentRoomCode}, but room state not found.`); }
+            }
         }
     });
 
-    // --- Registration ---
+    // --- Admin Registration ---
+    socket.on('register_admin', () => {
+        isAdmin = true;
+        adminSockets.add(socket.id);
+        console.log(`Admin registered: ${socket.id}. Total admins: ${adminSockets.size}`);
+        // Send current list of rooms *with controller status*
+        socket.emit('initial_room_list', getAdminRoomListData());
+    });
+
+    // --- App Registration ---
     socket.on('register_app_room', () => {
+        if (isAdmin) return;
         let roomCode = generateRoomCode();
-        // Ensure uniqueness
-        while (roomStates.has(roomCode)) {
-            roomCode = generateRoomCode();
-        }
+        while (roomStates.has(roomCode)) { roomCode = generateRoomCode(); }
         currentRoomCode = roomCode;
         console.log(`App (Socket: ${socket.id}) registering for NEW room code: ${roomCode}`);
-
         const newRoomState = createInitialRoomState(socket.id);
-        roomStates.set(roomCode, newRoomState); // Use 4-letter code as the map key
-
-        socket.join(roomCode); // Join the Socket.IO room named with the code
-
-        socket.emit('your_room_id', roomCode); // Send the code back
-        socket.emit('initial_state', getInitialStateForApp(newRoomState));
+        roomStates.set(roomCode, newRoomState);
+        socket.join(roomCode);
+        socket.emit('your_room_id', roomCode);
+        socket.emit('initial_state', getCurrentRoomAppState(newRoomState));
         socket.emit('set_cursor_visibility', false);
+        // Inform admins about the new room (initially no controllers)
+        broadcastToAdmins('room_created', {
+            code: roomCode,
+            hasControllers: false
+        });
     });
 
-    // Rejoin logic also uses uppercase code
-    socket.on('rejoin_app_room', (roomCode) => {
-        const upperRoomCode = roomCode.toUpperCase(); // Ensure lookup is case-insensitive
-        console.log(`App (Socket: ${socket.id}) attempting to REJOIN room code: ${upperRoomCode}`);
-        const roomState = roomStates.get(upperRoomCode);
+    // --- App Rejoin ---
+    socket.on('rejoin_app_room', (roomCode) => { /* ... same logic ... */ const upperRoomCode = roomCode.toUpperCase(); console.log(`App (Socket: ${socket.id}) attempting to REJOIN room code: ${upperRoomCode}`); const roomState = roomStates.get(upperRoomCode); if (roomState) { currentRoomCode = upperRoomCode; roomState.appSocketId = socket.id; socket.join(upperRoomCode); console.log(`App (Socket: ${socket.id}) successfully REJOINED room ${upperRoomCode}.`); socket.emit('your_room_id', upperRoomCode); socket.emit('initial_state', getCurrentRoomAppState(roomState)); socket.emit('set_cursor_visibility', roomState.lastKnownCursor.isVisible); roomState.controllerSocketIds.forEach(controllerSid => { io.to(controllerSid).emit('app_reconnected'); }); } else { console.warn(`App (Socket: ${socket.id}) failed to REJOIN room ${upperRoomCode}: Room not found.`); socket.emit('rejoin_failed', upperRoomCode); } });
 
-        if (roomState) {
-            currentRoomCode = upperRoomCode; // Associate with uppercase code
-            const oldAppSocketId = roomState.appSocketId;
-            roomState.appSocketId = socket.id; // Update socket ID
+     // --- Controller Registration ---
+     socket.on('register_controller_room', (roomCode) => {
+          if (isAdmin) return;
+          const upperRoomCode = roomCode.toUpperCase();
+          console.log(`Controller ${socket.id} attempting to join room: ${upperRoomCode}`);
+          const roomState = roomStates.get(upperRoomCode);
+          if (roomState) {
+              currentRoomCode = upperRoomCode;
+              const wasFirstController = roomState.controllerSocketIds.size === 0; // Check BEFORE adding
+              roomState.controllerSocketIds.add(socket.id);
+              socket.join(upperRoomCode);
+              console.log(`Controller ${socket.id} joined room ${upperRoomCode}. Total: ${roomState.controllerSocketIds.size}`);
 
-            socket.join(upperRoomCode);
+              let cursorVisibilityChanged = false;
+              if (wasFirstController) { // If it WAS the first controller
+                   roomState.lastKnownCursor.isVisible = true; // Now visible
+                   cursorVisibilityChanged = true;
+                   console.log(`First controller joined room ${upperRoomCode}. Broadcasting cursor visibility.`);
+                   // *** Inform admins controller status is now true ***
+                   broadcastToAdmins('room_controller_status', {
+                       code: upperRoomCode,
+                       hasControllers: true
+                   });
+              }
 
-            console.log(`App (Socket: ${socket.id}) successfully REJOINED room ${upperRoomCode}. Old socket was ${oldAppSocketId}.`);
+              socket.emit('update_controller_state', { controllerState: roomState.controllerState });
 
-            socket.emit('your_room_id', upperRoomCode); // Confirm the code
-            socket.emit('initial_state', getInitialStateForApp(roomState));
-            socket.emit('set_cursor_visibility', roomState.lastKnownCursor.isVisible);
+              if (cursorVisibilityChanged) {
+                   io.to(upperRoomCode).emit('set_cursor_visibility', true);
+              }
+          } else { /* ... invalid room handling ... */ console.warn(`Controller ${socket.id} failed to join room ${upperRoomCode}: Room not found.`); socket.emit('invalid_room', upperRoomCode); socket.disconnect(); }
+     });
 
-             roomState.controllerSocketIds.forEach(controllerSid => { io.to(controllerSid).emit('app_reconnected'); });
+    // --- Admin Peek Logic --- (No changes needed here)
+    socket.on('peek_request', (roomCode) => { /* ... */ if (!isAdmin) return; const upperRoomCode = roomCode.toUpperCase(); const roomState = roomStates.get(upperRoomCode); if (roomState) { console.log(`Admin ${socket.id} peeking into room ${upperRoomCode}`); socket.join(upperRoomCode); socket.emit('peek_initial_state', getCurrentRoomAppState(roomState)); } else { console.warn(`Admin ${socket.id} failed peek request for room ${upperRoomCode}: Not found.`); } });
+    socket.on('stop_peeking', (roomCode) => { /* ... */ if (!isAdmin) return; const upperRoomCode = roomCode.toUpperCase(); console.log(`Admin ${socket.id} stopped peeking room ${upperRoomCode}`); socket.leave(upperRoomCode); });
 
-        } else {
-            console.warn(`App (Socket: ${socket.id}) failed to REJOIN room ${upperRoomCode}: Room not found.`);
-            socket.emit('rejoin_failed', upperRoomCode);
-        }
-    });
+    // --- State Reporting & Broadcasting --- (No changes needed here)
+    socket.on('report_cursor_position', (data) => { /* ... */ if (data && data.roomId && data.pos) { const roomState = roomStates.get(data.roomId); if (roomState && socket.id === roomState.appSocketId) { roomState.lastKnownCursor.x = data.pos.x; roomState.lastKnownCursor.y = data.pos.y; io.to(data.roomId).emit('cursor_position_update', roomState.lastKnownCursor); } } });
+    socket.on('report_focus_change', (data) => { /* ... */ if (data && data.roomId && data.focusInfo) { const roomState = roomStates.get(data.roomId); if (roomState && socket.id === roomState.appSocketId) { roomState.lastKnownFocusSelector = data.focusInfo.selector; roomState.lastKnownFocusValue = data.focusInfo.value || ''; io.to(data.roomId).emit('focus_update', { selector: roomState.lastKnownFocusSelector, value: roomState.lastKnownFocusValue }); } } });
 
-    socket.on('register_controller_room', (roomCode) => { // roomCode might be mixed case from URL/input
-        const upperRoomCode = roomCode.toUpperCase(); // Standardize to uppercase for lookup and joining
-        console.log(`Controller ${socket.id} attempting to join room: ${upperRoomCode} (Original: ${roomCode})`);
-        const roomState = roomStates.get(upperRoomCode);
-
-        if (roomState) {
-             currentRoomCode = upperRoomCode; // Associate with uppercase code
-             roomState.controllerSocketIds.add(socket.id);
-             socket.join(upperRoomCode); // Join room named with uppercase code
-             console.log(`Controller ${socket.id} successfully joined room ${upperRoomCode}. Total: ${roomState.controllerSocketIds.size}`);
-
-             let cursorVisibilityChanged = false;
-             if (!roomState.lastKnownCursor.isVisible) { /* ... update visibility ... */ roomState.lastKnownCursor.isVisible = true; cursorVisibilityChanged = true; console.log(`First controller joined room ${upperRoomCode}. Updating app cursor state.`); }
-
-             socket.emit('update_controller_state', { controllerState: roomState.controllerState });
-
-             if (cursorVisibilityChanged && roomState.appSocketId) { /* ... update app visibility ... */ const appSocket = io.sockets.sockets.get(roomState.appSocketId); if (appSocket) { io.to(roomState.appSocketId).emit('set_cursor_visibility', true); } else { console.warn(`Room ${upperRoomCode}: App owner socket ${roomState.appSocketId} not found.`); roomState.lastKnownCursor.isVisible = true; } }
-         } else {
-            console.warn(`Controller ${socket.id} failed to join room ${upperRoomCode}: Room not found.`);
-            socket.emit('invalid_room', upperRoomCode); // Send back the code that failed
-            socket.disconnect();
-         }
-    });
-
-    // --- State Reporting ---
-    // Ensure roomId is standardized (although app sends the one it was given, which is already upper)
-    socket.on('report_cursor_position', (data) => { /* ... validation ... */ if (data && data.roomId && data.pos) { const roomState = roomStates.get(data.roomId); if (roomState && socket.id === roomState.appSocketId) { roomState.lastKnownCursor.x = data.pos.x; roomState.lastKnownCursor.y = data.pos.y; } } });
-    socket.on('report_focus_change', (data) => { /* ... validation ... */ if (data && data.roomId && data.focusInfo) { const roomState = roomStates.get(data.roomId); if (roomState && socket.id === roomState.appSocketId) { roomState.lastKnownFocusSelector = data.focusInfo.selector; roomState.lastKnownFocusValue = data.focusInfo.value || ''; } } });
-
-    // --- Controller Actions ---
-    // Standardize roomId to uppercase for lookup in all action handlers
-    socket.on('cursor_move', (data) => { /* ... */ if (data && data.roomId) { const upperRoomCode = data.roomId.toUpperCase(); const roomState = roomStates.get(upperRoomCode); if (roomState && roomState.controllerSocketIds.has(socket.id)) { if (roomState.appSocketId) { const appSocket = io.sockets.sockets.get(roomState.appSocketId); if (appSocket) { const sensitiveData = { deltaX: (data.deltaX || 0) * roomState.sensitivity, deltaY: (data.deltaY || 0) * roomState.sensitivity }; io.to(roomState.appSocketId).emit('cursor_move', sensitiveData); } else console.warn(`[Server] cursor_move: App socket ${roomState.appSocketId} not connected in room ${upperRoomCode}.`); } } else console.warn(`[Server] cursor_move: Validation failed for room ${upperRoomCode} or sender ${socket.id}.`); } });
-    socket.on('tap', (data) => { /* ... */ if (data && data.roomId) { const upperRoomCode = data.roomId.toUpperCase(); const roomState = roomStates.get(upperRoomCode); if (roomState && roomState.controllerSocketIds.has(socket.id)) { if (roomState.appSocketId) { const appSocket = io.sockets.sockets.get(roomState.appSocketId); if (appSocket) { io.to(roomState.appSocketId).emit('tap', { source: data.source }); } else console.warn(`[Server] tap: App socket ${roomState.appSocketId} not connected in room ${upperRoomCode}.`); } } else console.warn(`[Server] tap: Validation failed for room ${upperRoomCode} or sender ${socket.id}.`); } });
-    socket.on('key_input', (data) => { /* ... */ if (data && data.roomId && data.key) { const upperRoomCode = data.roomId.toUpperCase(); const roomState = roomStates.get(upperRoomCode); if (roomState && roomState.controllerSocketIds.has(socket.id)) { const key = data.key; let controllerStateChanged = false; let keyToBroadcast = null; if (key === 'ToggleMode') { /* ... */ if (data.targetMode && ['letters', 'numbers', 'symbols2'].includes(data.targetMode)) { if (roomState.controllerState.keyboardMode !== data.targetMode) { roomState.controllerState.keyboardMode = data.targetMode; roomState.controllerState.isShiftActive = false; controllerStateChanged = true; } } } else if (key === 'ToggleShift') { /* ... */ if (roomState.controllerState.keyboardMode === 'letters') { roomState.controllerState.isShiftActive = !roomState.controllerState.isShiftActive; controllerStateChanged = true; } } else { /* ... */ if (roomState.controllerState.keyboardMode === 'letters' && roomState.controllerState.isShiftActive && key.length === 1 && key >= 'a' && key <= 'z') { keyToBroadcast = key.toUpperCase(); roomState.controllerState.isShiftActive = false; controllerStateChanged = true; } else { keyToBroadcast = key; } } if (controllerStateChanged) { broadcastControllerStateToRoom(upperRoomCode); } if (keyToBroadcast && roomState.appSocketId) { const appSocket = io.sockets.sockets.get(roomState.appSocketId); if (appSocket) { io.to(roomState.appSocketId).emit('key_input', { key: keyToBroadcast }); } else console.warn(`[Server] key_input: App socket ${roomState.appSocketId} not connected in room ${upperRoomCode}.`); } } else console.warn(`[Server] key_input: Validation failed for room ${upperRoomCode} or sender ${socket.id}.`); } });
+    // --- Controller Actions -> Relay TO ROOM --- (No changes needed here)
+    socket.on('cursor_move', (data) => { /* ... */ if (data && data.roomId) { const upperRoomCode = data.roomId.toUpperCase(); const roomState = roomStates.get(upperRoomCode); if (roomState && roomState.controllerSocketIds.has(socket.id)) { if (roomState.appSocketId) { const appSocket = io.sockets.sockets.get(roomState.appSocketId); if (appSocket) { const sensitiveData = { deltaX: (data.deltaX || 0) * roomState.sensitivity, deltaY: (data.deltaY || 0) * roomState.sensitivity }; io.to(roomState.appSocketId).emit('cursor_move', sensitiveData); } } } } });
+    socket.on('tap', (data) => { /* ... */ if (data && data.roomId) { const upperRoomCode = data.roomId.toUpperCase(); const roomState = roomStates.get(upperRoomCode); if (roomState && roomState.controllerSocketIds.has(socket.id)) { io.to(upperRoomCode).emit('tap', { source: data.source }); } } });
+    socket.on('key_input', (data) => { /* ... */ if (data && data.roomId && data.key) { const upperRoomCode = data.roomId.toUpperCase(); const roomState = roomStates.get(upperRoomCode); if (roomState && roomState.controllerSocketIds.has(socket.id)) { const key = data.key; let controllerStateChanged = false; let keyToBroadcast = null; if (key === 'ToggleMode'){ if (data.targetMode && ['letters', 'numbers', 'symbols2'].includes(data.targetMode)) { if (roomState.controllerState.keyboardMode !== data.targetMode) { roomState.controllerState.keyboardMode = data.targetMode; roomState.controllerState.isShiftActive = false; controllerStateChanged = true; } } } else if (key === 'ToggleShift'){ if (roomState.controllerState.keyboardMode === 'letters') { roomState.controllerState.isShiftActive = !roomState.controllerState.isShiftActive; controllerStateChanged = true; } } else { if (roomState.controllerState.keyboardMode === 'letters' && roomState.controllerState.isShiftActive && key.length === 1 && key >= 'a' && key <= 'z') { keyToBroadcast = key.toUpperCase(); roomState.controllerState.isShiftActive = false; controllerStateChanged = true; } else { keyToBroadcast = key; } } if (controllerStateChanged) { broadcastControllerStateToRoom(upperRoomCode); } if (keyToBroadcast) { io.to(upperRoomCode).emit('key_input', { key: keyToBroadcast }); } } } });
 
 });
 

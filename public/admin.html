@@ -1,0 +1,203 @@
+<!-- START OF FILE public/admin.html -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Admin View - Remote Controller</title>
+    <script src="https://cdn.socket.io/4.7.2/socket.io.min.js"></script>
+    <style>
+        /* Styles */
+        body { font-family: sans-serif; display: flex; height: 100vh; margin: 0; }
+        #roomListContainer { width: 200px; border-right: 1px solid #ccc; padding: 10px; overflow-y: auto; flex-shrink: 0; background-color: #f9f9f9; }
+        #roomList { list-style: none; padding: 0; margin: 0; }
+        #roomList li { padding: 8px 8px 8px 22px; margin-bottom: 5px; border: 1px solid #eee; cursor: pointer; border-radius: 4px; font-family: monospace; font-weight: bold; letter-spacing: 1px; background-color: #fff; position: relative; }
+        #roomList li::before { content: ''; position: absolute; left: 8px; top: 50%; transform: translateY(-50%); width: 10px; height: 10px; border-radius: 50%; background-color: #ccc; /* Default grey */ }
+        #roomList li.has-controllers::before { background-color: lightgreen; }
+        #roomList li.no-controllers::before { background-color: lightcoral; }
+        #roomList li:hover { background-color: #eef; }
+        #roomList li.peeking { background-color: #d0e0ff; border-color: #a0c0ff; font-weight: bold; }
+        #peekViewContainer { flex-grow: 1; padding: 20px; position: relative; background-color: #f0f0f0; } #peekViewContainer h2 { margin-top: 0; border-bottom: 1px solid #ccc; padding-bottom: 5px; } #peekInfo { font-family: monospace; white-space: pre; background-color: #fff; border: 1px solid #ddd; border-radius: 4px; padding: 15px; } #peekInfo p { margin: 0 0 10px 0; } #peekInfo strong { display: inline-block; width: 150px; } #peekInfo code { background-color: #eee; padding: 2px 4px; border-radius: 3px;} #peekCursor { width: 15px; height: 15px; border-radius: 50%; background-color: rgba(0, 0, 255, 0.7); border: 1px solid blue; position: absolute; transform: translate(-50%, -50%); pointer-events: none; display: none; z-index: 10; transition: top 0.05s linear, left 0.05s linear, background-color 0.1s ease; } #peekCursor.visible { display: block; } #peekCursor.flash { background-color: rgba(255, 0, 0, 0.8); } .status { font-style: italic; color: #666; } .error { color: red; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div id="roomListContainer">
+        <h2>Active Rooms</h2>
+        <ul id="roomList">
+            <li class="status">Connecting...</li>
+        </ul>
+    </div>
+    <div id="peekViewContainer">
+        <!-- Peek view HTML -->
+        <h2 id="peekRoomTitle">Select a Room to Peek</h2> <div id="peekCursor"></div> <div id="peekInfo"> <p><strong>Cursor Visible:</strong> <span id="infoCursorVisible">-</span></p> <p><strong>Cursor Pos (X, Y):</strong> (<span id="infoCursorX">-</span>, <span id="infoCursorY">-</span>)</p> <p><strong>Focused Element:</strong> <code id="infoFocusSelector">-</code></p> <p><strong>Focused Value:</strong></p> <textarea id="infoFocusValue" rows="3" style="width: 90%; font-family: monospace; background-color: #eee;" readonly>-</textarea> </div> <p id="peekStatus" class="status" style="margin-top: 20px;"></p>
+    </div>
+
+    <script>
+        const socket = io();
+
+        // Element references... (same)
+        const roomListUl = document.getElementById('roomList');
+        const peekRoomTitle = document.getElementById('peekRoomTitle');
+        const peekCursorElement = document.getElementById('peekCursor');
+        const infoCursorVisible = document.getElementById('infoCursorVisible');
+        const infoCursorX = document.getElementById('infoCursorX');
+        const infoCursorY = document.getElementById('infoCursorY');
+        const infoFocusSelector = document.getElementById('infoFocusSelector');
+        const infoFocusValue = document.getElementById('infoFocusValue');
+        const peekStatus = document.getElementById('peekStatus'); // Added missing reference
+
+        let currentPeekingRoom = null;
+        // **Store room info as a Map: { roomCode -> { hasControllers: boolean } }**
+        let roomControllerStatus = new Map();
+
+        // --- Helper Functions ---
+        function renderRoomList() {
+            roomListUl.innerHTML = ''; // Clear list visually
+
+            // Get codes from the Map keys and sort them
+            const sortedRoomCodes = Array.from(roomControllerStatus.keys()).sort();
+
+            if (sortedRoomCodes.length === 0) {
+                roomListUl.innerHTML = '<li class="status">No active rooms.</li>';
+                return;
+            }
+
+            sortedRoomCodes.forEach(roomCode => {
+                const status = roomControllerStatus.get(roomCode); // Get status object
+                const hasControllers = status ? status.hasControllers : false; // Default to false if somehow missing
+
+                const li = document.createElement('li');
+                li.textContent = roomCode;
+                li.dataset.roomCode = roomCode;
+
+                // Add classes for styling
+                li.classList.toggle('has-controllers', hasControllers);
+                li.classList.toggle('no-controllers', !hasControllers);
+                if (roomCode === currentPeekingRoom) {
+                    li.classList.add('peeking');
+                }
+
+                li.addEventListener('click', handleRoomClick);
+                roomListUl.appendChild(li);
+            });
+        }
+
+        // Updates the controller status for a specific room in the Map
+        function updateRoomControllerStatus(roomCode, hasControllers) {
+             // Check if room exists in map before updating (it should)
+             if (roomControllerStatus.has(roomCode)) {
+                  roomControllerStatus.get(roomCode).hasControllers = hasControllers;
+                  console.log(`[Admin] Updated status for ${roomCode}:`, roomControllerStatus.get(roomCode));
+             } else {
+                  // If status update arrives before room_created (unlikely but possible), add it
+                  console.warn(`[Admin] Received controller status for unknown room ${roomCode}, adding.`);
+                  roomControllerStatus.set(roomCode, { hasControllers: hasControllers });
+             }
+             renderRoomList(); // Re-render the list to reflect the change
+         }
+
+        // Other helpers remain the same...
+        function clearPeekView() { /* ... same ... */ peekRoomTitle.textContent = 'Select a Room to Peek'; infoCursorVisible.textContent = '-'; infoCursorX.textContent = '-'; infoCursorY.textContent = '-'; infoFocusSelector.textContent = '-'; infoFocusValue.value = '-'; peekCursorElement.classList.remove('visible'); peekStatus.textContent = ''; peekStatus.classList.remove('error'); }
+        function updatePeekViewFullState(state) { /* ... same ... */ if (!state || !currentPeekingRoom) return; console.log(`[Admin] Updating full peek view for ${currentPeekingRoom}`, state); peekRoomTitle.textContent = `Peeking Room: ${currentPeekingRoom}`; peekStatus.textContent = 'Receiving live updates...'; peekStatus.classList.remove('error'); updateCursorDisplay(state.cursor); updateFocusDisplay(state.focusedElementSelector, state.focusedElementValue); }
+        function updateCursorDisplay(cursorState) { /* ... same ... */ if (!currentPeekingRoom || !cursorState) return; const isVisible = !!cursorState.isVisible; infoCursorVisible.textContent = isVisible ? 'Yes' : 'No'; peekCursorElement.classList.toggle('visible', isVisible); if (isVisible) { const x = cursorState.x ?? 0; const y = cursorState.y ?? 0; infoCursorX.textContent = x.toFixed(0); infoCursorY.textContent = y.toFixed(0); const containerRect = peekViewContainer.getBoundingClientRect(); const displayX = x * 0.2 + containerRect.width * 0.1; const displayY = y * 0.2 + containerRect.height * 0.1; peekCursorElement.style.left = `${displayX}px`; peekCursorElement.style.top = `${displayY}px`; } else { infoCursorX.textContent = '-'; infoCursorY.textContent = '-'; } }
+        function updateFocusDisplay(selector, value) { /* ... same ... */ if (!currentPeekingRoom) return; infoFocusSelector.textContent = selector || '-'; infoFocusValue.value = value || '-'; }
+        function handleRoomClick(event) { /* ... same ... */ const selectedRoomCode = event.target.dataset.roomCode; if (!selectedRoomCode || selectedRoomCode === currentPeekingRoom) { return; } if (currentPeekingRoom) { console.log(`[Admin] Requesting to stop peeking room: ${currentPeekingRoom}`); socket.emit('stop_peeking', currentPeekingRoom); } console.log(`[Admin] Requesting to peek room: ${selectedRoomCode}`); currentPeekingRoom = selectedRoomCode; clearPeekView(); peekRoomTitle.textContent = `Loading Room: ${currentPeekingRoom}...`; peekStatus.textContent = 'Requesting room state...'; socket.emit('peek_request', currentPeekingRoom); renderRoomList(); }
+
+
+        // --- Socket.IO Handlers ---
+        socket.on('connect', () => {
+            console.log('[Admin] Connected to server.');
+            // Reset state and UI on Connect
+            roomControllerStatus = new Map(); // *** Reset the Map ***
+            currentPeekingRoom = null;
+            clearPeekView();
+            roomListUl.innerHTML = '<li class="status">Connected. Getting list...</li>';
+            socket.emit('register_admin');
+        });
+
+        socket.on('disconnect', (reason) => {
+            console.log('[Admin] Disconnected.', reason);
+            // Reset state and UI on Disconnect
+            roomControllerStatus = new Map(); // *** Reset the Map ***
+            currentPeekingRoom = null;
+            clearPeekView();
+            roomListUl.innerHTML = '<li class="status error">Disconnected</li>';
+        });
+
+        // **MODIFIED:** Receive initial list and populate the Map
+        socket.on('initial_room_list', (roomListData) => {
+            console.log('[Admin] Received initial room list data:', roomListData);
+            roomControllerStatus = new Map(); // Start fresh
+             if (Array.isArray(roomListData)) {
+                 roomListData.forEach(room => {
+                     if (room && typeof room.code === 'string' && room.code.length > 0) {
+                         roomControllerStatus.set(room.code, { hasControllers: !!room.hasControllers });
+                     }
+                 });
+             }
+            console.log('[Admin] Initialized roomControllerStatus:', roomControllerStatus);
+            renderRoomList();
+        });
+
+        // **MODIFIED:** Add new room to the Map
+        socket.on('room_created', (roomData) => { // Expects { code: 'ABCD', hasControllers: false }
+            console.log('[Admin] Raw room_created:', roomData);
+            if (roomData && typeof roomData.code === 'string' && roomData.code.length > 0) {
+                 if (!roomControllerStatus.has(roomData.code)) { // Avoid duplicates
+                      roomControllerStatus.set(roomData.code, {
+                          hasControllers: !!roomData.hasControllers
+                      });
+                      console.log('[Admin] Added room to status map:', roomData.code);
+                      renderRoomList();
+                 }
+            } else { console.warn('Received invalid room_created data:', roomData); }
+        });
+
+        // **MODIFIED:** Remove room from the Map
+        socket.on('room_destroyed', (roomCode) => {
+            console.log('[Admin] Raw room_destroyed:', roomCode);
+            if (typeof roomCode === 'string' && roomCode.length > 0) {
+                if (roomControllerStatus.delete(roomCode)) { // delete returns true if found & deleted
+                    console.log('[Admin] Removed room from status map:', roomCode);
+                    renderRoomList();
+                    if (currentPeekingRoom === roomCode) {
+                        clearPeekView();
+                        peekStatus.textContent = `Room ${roomCode} was closed.`;
+                        peekStatus.classList.add('error');
+                        currentPeekingRoom = null;
+                    }
+                }
+            } else { console.warn('Received invalid or empty room_destroyed code:', roomCode); }
+        });
+
+        // **NEW/MODIFIED:** Handle controller status updates by updating the Map
+        socket.on('room_controller_status', (statusUpdate) => { // Expects { code: 'ABCD', hasControllers: true/false }
+             console.log('[Admin] Received controller status update:', statusUpdate);
+             if (statusUpdate && typeof statusUpdate.code === 'string' && statusUpdate.code.length > 0) {
+                 // Update status or add if somehow missing
+                 const currentStatus = roomControllerStatus.get(statusUpdate.code) || {};
+                 currentStatus.hasControllers = !!statusUpdate.hasControllers;
+                 roomControllerStatus.set(statusUpdate.code, currentStatus);
+                 console.log(`[Admin] Updated status for ${statusUpdate.code}:`, currentStatus);
+                 renderRoomList();
+             } else {
+                 console.warn('Received invalid controller status update:', statusUpdate);
+             }
+        });
+
+
+        // Other handlers remain the same...
+        socket.on('peek_initial_state', (state) => { if (currentPeekingRoom) { console.log(`[Admin] Received initial state for ${currentPeekingRoom}:`, state); updatePeekViewFullState(state); } else { console.log("[Admin] Received initial state but not currently peeking.", state); } });
+        socket.on('cursor_position_update', (cursorState) => { updateCursorDisplay(cursorState); });
+        socket.on('focus_update', (focusData) => { updateFocusDisplay(focusData.selector, focusData.value); });
+        socket.on('set_cursor_visibility', (isVisible) => { updateCursorDisplay({ isVisible: isVisible }); });
+        socket.on('tap', (data) => { peekStatus.textContent = `Live Update: Tap (${data.source}) detected... (${new Date().toLocaleTimeString()})`; peekCursorElement.classList.add('flash'); setTimeout(() => { peekCursorElement.classList.remove('flash'); }, 150); });
+        socket.on('key_input', (data) => { peekStatus.textContent = `Live Update: Key '${data.key}' received... (${new Date().toLocaleTimeString()})`; });
+
+        // --- Initial Setup ---
+        clearPeekView();
+
+    </script>
+</body>
+</html>
+<!-- END OF FILE public/admin.html -->
